@@ -247,3 +247,104 @@ export function searchBusStops(query: string): BusStop[] {
     );
   });
 }
+
+export interface LtaConnectionStatus {
+  isConfigured: boolean;
+  isHealthy: boolean;
+  message: string;
+}
+
+// Check health of the /api/health endpoint
+export async function checkLtaHealth(): Promise<LtaConnectionStatus> {
+  try {
+    const res = await fetch('/api/health');
+    if (!res.ok) {
+      return { isConfigured: false, isHealthy: false, message: 'Serverless health check failed' };
+    }
+    const data = await res.json();
+    const hasKey = Boolean(data.environment?.ltaAccountKeyConfigured);
+    return {
+      isConfigured: hasKey,
+      isHealthy: true,
+      message: hasKey
+        ? 'Connected to LTA Datamall'
+        : 'LTA_ACCOUNT_KEY not configured. Running high-precision transit simulator.',
+    };
+  } catch (err) {
+    return { isConfigured: false, isHealthy: false, message: 'API gateway unreachable' };
+  }
+}
+
+// Convert LTA Datamall NextBus object to BusArrivalDetail
+function parseLtaNextBus(nb?: {
+  EstimatedArrival?: string;
+  Latitude?: string;
+  Longitude?: string;
+  Load?: string;
+  Feature?: string;
+  Type?: string;
+}): BusArrivalDetail | undefined {
+  if (!nb || !nb.EstimatedArrival) return undefined;
+
+  const arrivalMs = new Date(nb.EstimatedArrival).getTime();
+  const diffSec = Math.max(0, Math.floor((arrivalMs - Date.now()) / 1000));
+  const diffMin = Math.floor(diffSec / 60);
+
+  const lat = nb.Latitude ? parseFloat(nb.Latitude) : undefined;
+  const lng = nb.Longitude ? parseFloat(nb.Longitude) : undefined;
+
+  return {
+    estimatedArrival: nb.EstimatedArrival,
+    estimatedMinutes: diffMin,
+    estimatedSeconds: diffSec,
+    load: (nb.Load as CrowdLoad) || 'SEA',
+    feature: nb.Feature === 'WAB' ? 'WAB' : '',
+    type: (nb.Type as BusType) || 'SD',
+    latitude: lat && lat > 0 ? lat : undefined,
+    longitude: lng && lng > 0 ? lng : undefined,
+  };
+}
+
+// Fetch live LTA Datamall data via serverless /api/busarrival
+export async function fetchLiveLtaBusArrival(busStopCode: string): Promise<BusArrivalService[] | null> {
+  try {
+    const res = await fetch(`/api/busarrival?BusStopCode=${encodeURIComponent(busStopCode)}`);
+    if (!res.ok) {
+      return null;
+    }
+    const data = await res.json();
+    if (!data.Services || !Array.isArray(data.Services)) {
+      return null;
+    }
+
+    return data.Services.map((item: any) => {
+      const nextBus1 = parseLtaNextBus(item.NextBus);
+      const nextBus2 = parseLtaNextBus(item.NextBus2);
+      const nextBus3 = parseLtaNextBus(item.NextBus3);
+
+      return {
+        serviceNo: item.ServiceNo,
+        operator: (item.Operator as BusOperator) || 'SBST',
+        destinationCode: item.NextBus?.DestinationCode || '',
+        destinationName: `Stop ${item.NextBus?.DestinationCode || 'Destination'}`,
+        category: 'Trunk',
+        nextBus: nextBus1 || {
+          estimatedArrival: new Date().toISOString(),
+          estimatedMinutes: 0,
+          estimatedSeconds: 0,
+          load: 'SEA',
+          feature: 'WAB',
+          type: 'SD',
+        },
+        nextBus2,
+        nextBus3,
+        inService: Boolean(nextBus1),
+      };
+    }).sort((a: BusArrivalService, b: BusArrivalService) => {
+      return a.nextBus.estimatedMinutes - b.nextBus.estimatedMinutes;
+    });
+  } catch (err) {
+    return null;
+  }
+}
+

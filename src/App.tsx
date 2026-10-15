@@ -14,6 +14,9 @@ import {
   getBusArrivalsForStop,
   getActiveFleetVehicles,
   getNearbyBusStops,
+  fetchLiveLtaBusArrival,
+  checkLtaHealth,
+  LtaConnectionStatus,
 } from './services/busArrivalEngine';
 import { Header } from './components/Header';
 import { BusStopSelector } from './components/BusStopSelector';
@@ -106,10 +109,48 @@ export default function App() {
     return () => clearInterval(timer);
   }, []);
 
-  // Live bus arrivals for current stop
+  // LTA Connection Status & Live API Data
+  const [ltaStatus, setLtaStatus] = useState<LtaConnectionStatus | null>(null);
+  const [liveLtaArrivals, setLiveLtaArrivals] = useState<BusArrivalService[] | null>(null);
+  const [isLiveFromLta, setIsLiveFromLta] = useState<boolean>(false);
+
+  // Check LTA Gateway health on mount
+  useEffect(() => {
+    checkLtaHealth().then((status) => {
+      setLtaStatus(status);
+    });
+  }, []);
+
+  // Fetch live LTA Datamall data when currentStop changes or on manual refresh
+  useEffect(() => {
+    let isCancelled = false;
+
+    async function loadLiveArrivals() {
+      const liveData = await fetchLiveLtaBusArrival(currentStop.code);
+      if (!isCancelled) {
+        if (liveData && liveData.length > 0) {
+          setLiveLtaArrivals(liveData);
+          setIsLiveFromLta(true);
+        } else {
+          setLiveLtaArrivals(null);
+          setIsLiveFromLta(false);
+        }
+      }
+    }
+
+    loadLiveArrivals();
+    return () => {
+      isCancelled = true;
+    };
+  }, [currentStop.code, isRefreshing]);
+
+  // Bus arrivals for current stop (prefers live LTA data, falls back to engine)
   const arrivals: BusArrivalService[] = useMemo(() => {
+    if (liveLtaArrivals && liveLtaArrivals.length > 0) {
+      return liveLtaArrivals;
+    }
     return getBusArrivalsForStop(currentStop.code, timestampSeconds);
-  }, [currentStop.code, timestampSeconds]);
+  }, [liveLtaArrivals, currentStop.code, timestampSeconds]);
 
   // Active moving fleet across Singapore
   const activeVehicles: ActiveBusVehicle[] = useMemo(() => {
@@ -274,6 +315,31 @@ export default function App() {
                 onToggleSave={toggleSaveCurrentStop}
                 allStops={SINGAPORE_BUS_STOPS}
               />
+
+              {/* LTA DataMall Gateway Status */}
+              <div className="px-3.5 py-2 rounded-xl bg-slate-900/60 border border-slate-800 flex items-center justify-between gap-3 text-xs">
+                <div className="flex items-center gap-2">
+                  <span
+                    className={`w-2 h-2 rounded-full ${
+                      isLiveFromLta
+                        ? 'bg-emerald-400 animate-pulse'
+                        : ltaStatus?.isConfigured
+                        ? 'bg-emerald-400'
+                        : 'bg-amber-400'
+                    }`}
+                  />
+                  <span className="font-medium text-slate-300">
+                    {isLiveFromLta
+                      ? 'Live LTA DataMall v3 Stream Active'
+                      : ltaStatus?.isConfigured
+                      ? 'LTA Key Configured · Live Feed Active'
+                      : 'LTA Gateway: /api/busarrival (Awaiting LTA_ACCOUNT_KEY)'}
+                  </span>
+                </div>
+                <div className="font-mono-numbers text-[11px] text-slate-400 hidden sm:block">
+                  GET /api/busarrival?BusStopCode={currentStop.code}
+                </div>
+              </div>
 
               {/* Filtering & Sorting Controls Bar */}
               <div className="bg-slate-900/90 border border-slate-800 rounded-xl p-3 flex flex-wrap items-center justify-between gap-3 text-xs">
